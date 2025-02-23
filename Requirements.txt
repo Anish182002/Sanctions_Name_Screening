@@ -1,0 +1,9 @@
+rapidfuzz
+beautifulsoup4
+lxml
+requests
+pandas
+openpyxl
+unicodedata
+jellyfish
+urllib3
