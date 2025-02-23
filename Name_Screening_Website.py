@@ -13,9 +13,9 @@ import unicodedata
 import re
 from bs4 import BeautifulSoup
 import urllib3
+import io
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 
 # Name Normalization with Multiple Aliases Handling
 def normalize_name(name):
@@ -24,7 +24,6 @@ def normalize_name(name):
     name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8')
     aliases = re.split(r'\s*[@|/|\|]\s*', name)
     return [re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s', '', alias).strip().lower() for alias in aliases]
-
 
 # Fetch Names from Website
 def fetch_names_from_website(url):
@@ -36,7 +35,6 @@ def fetch_names_from_website(url):
         soup = BeautifulSoup(response.text, 'html.parser')
         return pd.Series([tag.get_text(strip=True) for tag in soup.find_all('p')]).dropna()
 
-
 # Hybrid Matching
 def hybrid_match(name1_list, name2_list):
     return max(
@@ -44,7 +42,6 @@ def hybrid_match(name1_list, name2_list):
             10 if jellyfish.soundex(n1) == jellyfish.soundex(n2) else 0))
         for n1 in name1_list for n2 in name2_list
     )
-
 
 # Perform Screening
 def perform_screening(names_list, customers, threshold=55):
@@ -55,7 +52,6 @@ def perform_screening(names_list, customers, threshold=55):
         if hybrid_match(normalize_name(c), normalize_name(n)) >= threshold
     ]
     return pd.DataFrame(results).sort_values(by='Score', ascending=False) if results else pd.DataFrame()
-
 
 # Streamlit Web App
 st.title('Sanctions Name Screening System')
@@ -71,8 +67,7 @@ output_format = st.radio("Choose Output Format:", ('xlsx', 'csv'))
 
 if st.button('Run Screening') and file:
     if file.name.endswith('.xlsx'):
-        customers = pd.concat(pd.read_excel(file, sheet_name=None, engine='openpyxl').values()).stack().astype(
-            str).dropna()
+        customers = pd.concat(pd.read_excel(file, sheet_name=None, engine='openpyxl').values()).stack().astype(str).dropna()
     else:
         customers = pd.read_csv(file).stack().astype(str).dropna()
 
@@ -90,12 +85,19 @@ if st.button('Run Screening') and file:
 
     results = perform_screening(comparison_names, customers)
     if not results.empty:
-        output_file = os.path.join(os.path.expanduser('~'), 'Downloads', f'screening_results.{output_format}')
-        if output_format == 'xlsx':
-            results.to_excel(output_file, index=False, engine='openpyxl')
-        else:
-            results.to_csv(output_file, index=False)
-        st.success(f'Screening Completed! Results saved to {output_file}')
+        st.success('Screening Completed! Download results below:')
         st.dataframe(results)
+
+        if output_format == 'xlsx':
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                results.to_excel(writer, index=False)
+            output.seek(0)
+            st.download_button("Download Results", data=output, file_name="screening_results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            output = io.StringIO()
+            results.to_csv(output, index=False)
+            st.download_button("Download Results", data=output.getvalue(), file_name="screening_results.csv", mime="text/csv")
     else:
         st.warning('No matches found. Check input data or URL.')
+
