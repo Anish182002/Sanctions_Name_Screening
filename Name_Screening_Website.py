@@ -1,7 +1,7 @@
 import os
 
 # Ensure all dependencies are installed in Streamlit Cloud
-os.system("pip install -r requirements.txt")
+os.system("pip install -r Requirements.txt")
 
 import streamlit as st
 import pandas as pd
