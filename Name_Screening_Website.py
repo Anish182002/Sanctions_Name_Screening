@@ -22,15 +22,19 @@ def normalize_name(name):
     aliases = re.split(r'\s*[@|/|\|]\s*', name)
     return [re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s', '', alias).strip().lower() for alias in aliases]
 
-# Fetch Names from Website
+# Fetch Names from a Website
 def fetch_names_from_website(url):
-    response = requests.get(url, verify=False)
-    if 'xml' in response.headers.get('Content-Type', ''):
-        tree = ET.fromstring(response.content)
-        return pd.Series([elem.text for elem in tree.iter() if elem.text]).dropna()
-    else:
-        soup = BeautifulSoup(response.text, 'html.parser')
-        return pd.Series([tag.get_text(strip=True) for tag in soup.find_all('p')]).dropna()
+    try:
+        response = requests.get(url, verify=False, timeout=10)
+        if 'xml' in response.headers.get('Content-Type', ''):
+            tree = ET.fromstring(response.content)
+            return pd.Series([elem.text for elem in tree.iter() if elem.text]).dropna()
+        else:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            return pd.Series([tag.get_text(strip=True) for tag in soup.find_all('p')]).dropna()
+    except Exception as e:
+        st.warning(f"Error fetching data from {url}: {str(e)}")
+        return pd.Series([])
 
 # Hybrid Matching Algorithm
 def hybrid_match(name1_list, name2_list):
@@ -53,7 +57,6 @@ def perform_screening(names_list, customers, threshold=55):
 # Extract Names from PDF (Instead of Full Text)
 def extract_names_from_pdf(pdf_file):
     text = ""
-    
     with fitz.open(pdf_file) as doc:
         for page in doc:
             text += page.get_text("text") + "\n"  # Extract text from each page
@@ -71,20 +74,17 @@ source_option = st.radio("Choose Screening Type:", ('From Another Workbook', 'Fr
 file = st.file_uploader("Upload Customer Workbook (Excel, CSV, or PDF)", type=["xlsx", "csv", "pdf"])
 
 # Predefined Websites for Screening
-default_websites = {
-    "UN Sanctions List": "https://scsanctions.un.org/resources/xml/en/consolidated.xml",
-    "MHA Banned Organizations": "https://www.mha.gov.in/en/banned-organisations",
-    "MHA Individual Terrorists": "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa",
-    "MHA Unlawful Associations": "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
-}
+default_websites = [
+    "https://scsanctions.un.org/resources/xml/en/consolidated.xml",
+    "https://www.mha.gov.in/en/banned-organisations",
+    "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa",
+    "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
+]
 
 if source_option == 'From XML or HTML Website':
-    website_choice = st.radio("Choose Website Source:", ("Default Websites", "Custom URL"))
+    website_choice = st.radio("Choose Website Source:", ("Default List (All Websites)", "Custom URL"))
 
-    if website_choice == "Default Websites":
-        website_url = st.selectbox("Select a Website:", list(default_websites.keys()))
-        selected_url = default_websites[website_url]
-    else:
+    if website_choice == "Custom URL":
         selected_url = st.text_input("Enter a Custom Website URL for Screening")
 
 output_format = st.radio("Choose Output Format:", ('xlsx', 'csv'))
@@ -118,11 +118,17 @@ if st.button('Run Screening') and file:
             st.warning('No comparison file uploaded.')
             comparison_names = pd.Series([])
     
-    elif source_option == 'From XML or HTML Website' and selected_url:
-        comparison_names = fetch_names_from_website(selected_url)
-    else:
-        st.warning('No valid source selected.')
+    elif source_option == 'From XML or HTML Website':
         comparison_names = pd.Series([])
+        if website_choice == "Default List (All Websites)":
+            for url in default_websites:
+                names = fetch_names_from_website(url)
+                comparison_names = pd.concat([comparison_names, names]).dropna()
+        elif website_choice == "Custom URL" and selected_url:
+            comparison_names = fetch_names_from_website(selected_url)
+        else:
+            st.warning('No valid source selected.')
+            comparison_names = pd.Series([])
 
     results = perform_screening(comparison_names, customers)
 
@@ -142,3 +148,4 @@ if st.button('Run Screening') and file:
             st.download_button("Download Results", data=output.getvalue(), file_name="screening_results.csv", mime="text/csv")
     else:
         st.warning('No matches found. Check input data or URL.')
+
