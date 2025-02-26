@@ -1,8 +1,11 @@
-rapidfuzz
+streamlit
+pandas
+requests
 beautifulsoup4
 lxml
-requests
-pandas
-openpyxl
+rapidfuzz
 jellyfish
+unicodedata2
+openpyxl
 urllib3
+PyMuPDF
