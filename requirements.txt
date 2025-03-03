@@ -6,3 +6,4 @@ lxml
 rapidfuzz
 jellyfish
 openpyxl
+PyMuPDF
