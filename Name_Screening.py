@@ -13,6 +13,15 @@ import re
 from bs4 import BeautifulSoup
 import urllib3
 import io
+import re
+import unicodedata
+
+def clean_name(name):
+    name = unicodedata.normalize("NFKD", name)        # Normalize unicode
+    name = re.sub(r'^\d+\.', '', name)                # Remove leading numbers like "4."
+    name = re.sub(r'[^\w\s]', '', name)               # Remove punctuation
+    name = re.sub(r'\s+', ' ', name)                  # Replace multiple spaces with single space
+    return name.strip().lower()
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
