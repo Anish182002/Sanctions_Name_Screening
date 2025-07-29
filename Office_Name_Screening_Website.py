@@ -1,93 +1,81 @@
 import streamlit as st
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 from rapidfuzz import fuzz
-import jellyfish
 import re
 import unicodedata
 
-# --- UN Sanctions Scraper ---
+# --------- Functions ---------
+
 @st.cache_data
-def fetch_un_sanctioned_names():
-    url = "https://scsanctions.un.org/kho39en-all.html"
+def fetch_un_sanctions_names():
+    url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
     response = requests.get(url)
-    soup = BeautifulSoup(response.content, "lxml")
-
-    paragraphs = soup.find_all("p")
+    root = ET.fromstring(response.content)
     names = []
+    for individual in root.findall(".//INDIVIDUAL"):
+        for name in individual.findall("INDIVIDUAL_ALIAS"):
+            alias_name = name.findtext("ALIAS_NAME")
+            if alias_name:
+                names.append(alias_name.strip())
+        name = individual.findtext("INDIVIDUAL_NAME")
+        if name:
+            names.append(name.strip())
+    return list(set(names))  # remove duplicates
 
-    for para in paragraphs:
-        text = para.get_text(strip=True)
-        matches = re.findall(r'^([A-Z][A-Z\s\-\,\.\(\)]+)', text)
-        for match in matches:
-            clean_name = normalize_text(match)
-            names.append(clean_name)
+def normalize_name(name):
+    name = name.lower()
+    name = unicodedata.normalize("NFKD", name)
+    name = re.sub(r"[^a-z\s]", "", name)
+    return name.strip()
 
-    return list(set(names))  # Unique names only
+def match_names(customer_names, sanctions_names, threshold=85):
+    matches = []
+    for customer in customer_names:
+        customer_clean = normalize_name(customer)
+        for sanction in sanctions_names:
+            sanction_clean = normalize_name(sanction)
+            score = fuzz.token_sort_ratio(customer_clean, sanction_clean)
+            if score >= threshold:
+                matches.append({
+                    "Customer Name": customer,
+                    "Sanctioned Name": sanction,
+                    "Score": score
+                })
+    return pd.DataFrame(matches)
 
-# --- Normalize Text ---
-def normalize_text(text):
-    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("utf-8")
-    return re.sub(r'\s+', ' ', text).strip().lower()
+def extract_customer_names(uploaded_file):
+    df = pd.read_excel(uploaded_file, engine='openpyxl')
+    name_columns = [col for col in df.columns if "name" in col.lower()]
+    all_names = []
+    for col in name_columns:
+        all_names.extend(df[col].dropna().astype(str).tolist())
+    return all_names
 
-# --- Get Soundex Code ---
-def soundex(name):
-    return jellyfish.soundex(name)
+# --------- Streamlit UI ---------
 
-# --- Matching Logic ---
-def is_match(customer_name, sanctioned_name):
-    norm_cust = normalize_text(customer_name)
-    norm_san = normalize_text(sanctioned_name)
+st.title("🚨 UN Sanctions Name Screening")
 
-    # Soundex match
-    if soundex(norm_cust) == soundex(norm_san):
-        return True
+uploaded_file = st.file_uploader("Upload Excel file with customer names", type=["xlsx"])
 
-    # Fuzzy match
-    score = fuzz.ratio(norm_cust, norm_san)
-    if score >= 85:
-        return True
+if uploaded_file:
+    with st.spinner("Loading UN Sanctions list..."):
+        sanctions_names = fetch_un_sanctions_names()
+    with st.spinner("Reading customer names..."):
+        customer_names = extract_customer_names(uploaded_file)
+    st.success(f"Found {len(customer_names)} customer names.")
 
-    return False
-
-# --- Main App ---
-def main():
-    st.title("🔍 UN Sanctions Name Screening")
-
-    # Load sanctioned names
-    with st.spinner("Fetching UN Sanctions List..."):
-        sanctioned_names = fetch_un_sanctioned_names()
-
-    # Upload Excel file
-    uploaded_file = st.file_uploader("Upload Customer Excel File", type=["xlsx"])
-    if uploaded_file:
-        df = pd.read_excel(uploaded_file, engine="openpyxl")
-        st.success("File uploaded successfully!")
-
-        # Show preview
-        st.subheader("Customer Data Preview")
-        st.dataframe(df.head())
-
-        # Detect name column
-        name_column = st.selectbox("Select the customer name column", df.columns)
-
-        results = []
-        for name in df[name_column].dropna():
-            for sanctioned in sanctioned_names:
-                if is_match(name, sanctioned):
-                    results.append({
-                        "Customer Name": name,
-                        "Sanctioned Name": sanctioned
-                    })
-                    break  # Stop after first match
-
-        if results:
-            st.subheader("🚨 Matches Found")
-            result_df = pd.DataFrame(results)
-            st.dataframe(result_df)
+    if st.button("Run Name Screening"):
+        with st.spinner("Running fuzzy matching..."):
+            results_df = match_names(customer_names, sanctions_names)
+        if not results_df.empty:
+            st.warning("⚠️ Potential Matches Found!")
+            st.dataframe(results_df)
+            csv = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download Matches as CSV", csv, "matches.csv", "text/csv")
         else:
-            st.success("✅ No matches found!")
+            st.success("✅ No matches found.")
 
-if __name__ == "__main__":
-    main()
+else:
+    st.info("Please upload an Excel file containing customer names.")
