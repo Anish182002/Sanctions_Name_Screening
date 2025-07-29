@@ -33,18 +33,15 @@ VARIANT_MAP = {
 }
 
 # Normalize name for matching
+# Normalize and tokenize name
 def normalize_name(name):
     if not isinstance(name, str):
-        return ['']
+        return []
     name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8')
-    aliases = re.split(r'\s*[@|/|\|,]\s*', name)
-    normalized = []
-    for alias in aliases:
-        cleaned = re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.?\s*', '', alias).strip().lower()
-        for k, v in VARIANT_MAP.items():
-            cleaned = re.sub(rf'\b{k}\b', v, cleaned)
-        normalized.append(cleaned)
-    return normalized
+    name = re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.?\s*', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'[^\w\s]', '', name)
+    return name.lower().strip().split()
+
 
 # Fetch and split names from websites
 @st.cache_data
@@ -81,17 +78,28 @@ def extract_text_from_pdf(file):
     text = "\n".join(page.get_text("text") for page in doc)
     return pd.Series(re.findall(r'\b[A-Za-z]+(?: [A-Za-z]+)*\b', text)).dropna()
 
-# Hybrid matching with better Soundex influence
-def hybrid_match(name1_list, name2_list):
+# Advanced hybrid match using token-wise phonetic + fuzzy + Jaro-Winkler
+def hybrid_match(name1_tokens, name2_tokens):
+    if not name1_tokens or not name2_tokens:
+        return 0
+
     scores = []
-    for n1 in name1_list:
-        for n2 in name2_list:
-            fuzz_score = fuzz.ratio(n1, n2)
-            jaro_score = jellyfish.jaro_winkler_similarity(n1, n2) * 100
-            soundex_score = 20 if jellyfish.soundex(n1) == jellyfish.soundex(n2) else 0
-            score = (fuzz_score * 0.3 + jaro_score * 0.5 + soundex_score)
-            scores.append(score)
-    return max(scores) if scores else 0
+    for t1 in name1_tokens:
+        best_score = 0
+        for t2 in name2_tokens:
+            # Basic scores
+            fuzz_score = fuzz.ratio(t1, t2)
+            jaro_score = jellyfish.jaro_winkler_similarity(t1, t2) * 100
+            soundex_score = 20 if jellyfish.soundex(t1) == jellyfish.soundex(t2) else 0
+
+            # Weighted average
+            token_score = (fuzz_score * 0.3 + jaro_score * 0.5 + soundex_score)
+            best_score = max(best_score, token_score)
+        scores.append(best_score)
+
+    # Final score is average of best scores for each token in name1
+    return sum(scores) / len(scores)
+
 
 # Parallel name screening
 def parallel_screening(names_list, customers, threshold=55):
