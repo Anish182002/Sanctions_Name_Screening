@@ -2,92 +2,95 @@ import streamlit as st
 import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
-from rapidfuzz import fuzz
 import unicodedata
 import re
+from rapidfuzz import fuzz
 
-# ------------------------- Utility Functions -------------------------
-
-def normalize_name(name):
-    name = unicodedata.normalize("NFKD", name)
-    name = re.sub(r'[^\w\s]', '', name)
-    name = name.lower().strip()
-    return name
-
-def fetch_sanctioned_names():
+# Extract names from UN consolidated sanctions list XML
+@st.cache_data
+def get_sanctioned_names():
     url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
     response = requests.get(url)
-    response.raise_for_status()
     root = ET.fromstring(response.content)
 
-    names = []
+    namespaces = {'ns': 'http://www.un.org/sanctions/1.0'}
+    names = set()
+
     for individual in root.findall(".//INDIVIDUAL"):
-        full_name = individual.findtext("INDIVIDUAL_NAME")
+        first_name = individual.findtext("FIRST_NAME")
+        second_name = individual.findtext("SECOND_NAME")
+        third_name = individual.findtext("THIRD_NAME")
+        fourth_name = individual.findtext("FOURTH_NAME")
+
+        full_name = " ".join(filter(None, [first_name, second_name, third_name, fourth_name]))
         if full_name:
-            names.append(normalize_name(full_name))
+            names.add(normalize_name(full_name))
 
     for entity in root.findall(".//ENTITY"):
-        entity_name = entity.findtext("ENTITY_NAME")
+        entity_name = entity.findtext("NAME")
         if entity_name:
-            names.append(normalize_name(entity_name))
+            names.add(normalize_name(entity_name))
 
-    return names
+    return list(names)
 
-def match_names(customer_names, sanctioned_names, threshold=85):
+# Normalize names: remove accents, special chars, lowercase
+def normalize_name(name):
+    name = unicodedata.normalize('NFKD', name)
+    name = name.encode('ascii', 'ignore').decode('utf-8')
+    name = re.sub(r'[^a-zA-Z0-9\s]', '', name)
+    return name.lower().strip()
+
+# Perform fuzzy matching
+def match_names(customers, sanctions, threshold=85):
     matches = []
-    for cust in customer_names:
-        cust_norm = normalize_name(cust)
-        for sanc in sanctioned_names:
-            score = fuzz.token_sort_ratio(cust_norm, sanc)
+
+    for customer in customers:
+        customer_norm = normalize_name(customer)
+        for sanction in sanctions:
+            score = fuzz.token_set_ratio(customer_norm, sanction)
             if score >= threshold:
-                matches.append((cust, sanc, score))
-    return matches
+                matches.append({
+                    'Customer Name': customer,
+                    'Sanctioned Name': sanction,
+                    'Similarity Score': score
+                })
 
-def load_customer_names(uploaded_file):
-    try:
-        df = pd.read_excel(uploaded_file, engine='openpyxl')
-        name_columns = [col for col in df.columns if 'name' in col.lower()]
-        if not name_columns:
-            st.warning("No column with 'name' found in the uploaded Excel file.")
-            return []
-        return df[name_columns[0]].dropna().astype(str).tolist()
-    except Exception as e:
-        st.error(f"Failed to read uploaded Excel file: {e}")
-        return []
+    return pd.DataFrame(matches)
 
-# ------------------------- Streamlit UI -------------------------
-
+# Main Streamlit UI
 def main():
-    st.set_page_config(page_title="UN Sanctions Name Screening", layout="centered")
-    st.title("🔍 UN Sanctions Name Screening App")
+    st.title("UN Sanctions Name Screening")
 
-    st.markdown("Upload an Excel file (`.xlsx`) with customer names to check against the UN consolidated sanctions list.")
+    st.markdown("Upload an Excel file (`.xlsx`) containing customer names in a column named **`Name`**.")
 
-    uploaded_file = st.file_uploader("Upload your customer Excel file", type=["xlsx"])
+    uploaded_file = st.file_uploader("Upload customer Excel file", type=['xlsx'])
 
     if uploaded_file:
-        with st.spinner("Loading sanctioned names from UN list..."):
-            sanctioned_names = fetch_sanctioned_names()
+        try:
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
 
-        with st.spinner("Reading customer names..."):
-            customer_names = load_customer_names(uploaded_file)
+            if 'Name' not in df.columns:
+                st.error("Excel file must contain a column named 'Name'")
+                return
 
-        if customer_names:
-            st.success(f"✅ Found {len(customer_names)} customer names in uploaded file.")
-            with st.spinner("Performing name screening..."):
-                matches = match_names(customer_names, sanctioned_names, threshold=85)
+            customer_names = df['Name'].dropna().tolist()
+            sanctioned_names = get_sanctioned_names()
 
-            if matches:
-                st.error(f"⚠️ {len(matches)} potential match(es) found!")
-                result_df = pd.DataFrame(matches, columns=["Customer Name", "Matched Sanction Name", "Match Score"])
-                st.dataframe(result_df)
+            st.info("Performing name screening... Please wait.")
+            result_df = match_names(customer_names, sanctioned_names)
 
-                csv = result_df.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇ Download Matches as CSV", csv, "sanctions_matches.csv", "text/csv")
+            if not result_df.empty:
+                st.success(f"Found {len(result_df)} potential match(es).")
+                st.dataframe(result_df.sort_values(by="Similarity Score", ascending=False))
+                csv = result_df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download results as CSV", csv, "matches.csv", "text/csv")
             else:
-                st.success("🎉 No matches found. All customers cleared.")
-        else:
-            st.warning("⚠️ No valid customer names found in the uploaded file.")
+                st.success("No matches found.")
+
+        except Exception as e:
+            st.error(f"Failed to read file: {e}")
+    else:
+        st.warning("Please upload a customer Excel file to proceed.")
 
 if __name__ == "__main__":
     main()
