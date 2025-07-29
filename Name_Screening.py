@@ -1,164 +1,96 @@
-import os
-import streamlit as st
-import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
-import concurrent.futures
-import numpy as np
-import fitz  # PyMuPDF
-from rapidfuzz import fuzz
-import jellyfish
+import pandas as pd
 import unicodedata
 import re
-from bs4 import BeautifulSoup
-import urllib3
-import io
+from rapidfuzz import fuzz
+import jellyfish
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# ----------- SETTINGS -----------
+UN_XML_URL = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
+CUSTOMER_FILE = "customers.xlsx"  # Your Excel input file
 
-# Default websites for screening
-DEFAULT_WEBSITES = [
-    "https://scsanctions.un.org/resources/xml/en/consolidated.xml",
-    "https://www.mha.gov.in/en/banned-organisations",
-    "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa",
-    "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
-]
+FUZZY_THRESHOLD = 85  # Adjust this for fuzzy score sensitivity
+# --------------------------------
 
-# Normalize Names
 def normalize_name(name):
-    if not isinstance(name, str):
-        return ['']
-    name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8')
-    aliases = re.split(r'\s*[@|/|\|]\s*', name)
-    return [re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s*', '', alias).strip().lower() for alias in aliases]
+    name = unicodedata.normalize("NFKD", name)
+    name = name.encode("ascii", "ignore").decode("utf-8")
+    name = name.lower()
+    name = re.sub(r'[^\w\s]', '', name)
+    return name.strip()
 
-# Fetch Names from Website
-@st.cache_data
-def fetch_names_from_website(url):
-    try:
-        response = requests.get(url, verify=False, timeout=10)
-        if 'xml' in response.headers.get('Content-Type', ''):
-            tree = ET.fromstring(response.content)
-            return pd.Series([elem.text for elem in tree.iter() if elem.text]).dropna()
-        else:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            return pd.Series([tag.get_text(strip=True) for tag in soup.find_all(['p', 'li', 'span'])]).dropna()
-    except Exception as e:
-        st.warning(f"Error fetching from {url}: {e}")
-        return pd.Series([])
+def fetch_sanctioned_names_from_un():
+    response = requests.get(UN_XML_URL)
+    root = ET.fromstring(response.content)
 
-@st.cache_data
-def fetch_all_default_names():
-    all_names = pd.Series([])
-    for url in DEFAULT_WEBSITES:
-        names = fetch_names_from_website(url)
-        all_names = pd.concat([all_names, names], ignore_index=True)
-    return all_names.dropna()
+    namespaces = {'': 'http://www.un.org/sanctions/1.0'}
+    sanctioned_names = []
 
-# Extract Text from PDF
-def extract_text_from_pdf(file):
-    doc = fitz.open(stream=file.read(), filetype="pdf")
-    text = "\n".join(page.get_text("text") for page in doc)
-    return pd.Series(re.findall(r'\b[A-Za-z]+(?: [A-Za-z]+)*\b', text)).dropna()
+    for individual in root.findall('.//INDIVIDUAL'):
+        names = []
+        for name_elem in individual.findall('INDIVIDUAL_ALIAS'):
+            alias = name_elem.find('ALIAS_NAME')
+            if alias is not None and alias.text:
+                names.append(alias.text.strip())
+        for name_elem in individual.findall('INDIVIDUAL_NAME'):
+            if name_elem.text:
+                names.append(name_elem.text.strip())
+        sanctioned_names.extend(names)
 
-# Improved Hybrid Matching
-def hybrid_match(name1_list, name2_list):
-    max_score = 0
-    for n1 in name1_list:
-        for n2 in name2_list:
-            fuzz_score = fuzz.ratio(n1, n2)
-            jaro_score = jellyfish.jaro_winkler_similarity(n1, n2) * 100
-            soundex_bonus = 20 if jellyfish.soundex(n1) == jellyfish.soundex(n2) else 0
-            partial_bonus = 10 if n1 in n2 or n2 in n1 else 0
+    return list(set(sanctioned_names))
 
-            total_score = fuzz_score * 0.4 + jaro_score * 0.5 + soundex_bonus + partial_bonus
-            max_score = max(max_score, total_score)
-    return max_score
+def load_customer_names(excel_file):
+    df = pd.read_excel(excel_file, engine='openpyxl')
+    customer_names = df.iloc[:, 0].dropna().tolist()
+    return customer_names
 
-# Parallel Screening
-def parallel_screening(names_list, customers, threshold=70):
-    results = []
+def get_soundex(name):
+    return jellyfish.soundex(name)
 
-    def process_chunk(chunk):
-        chunk_results = []
-        for c in chunk:
-            c_norm = normalize_name(c)
-            for n in names_list:
-                n_norm = normalize_name(n)
-                score = hybrid_match(c_norm, n_norm)
-                if score >= threshold:
-                    chunk_results.append({
-                        'Customer': c,
-                        'Matched Name': n,
-                        'Score': round(score, 2)
-                    })
-        return chunk_results
+def match_names(customer_names, sanctioned_names):
+    matches = []
 
-    customer_chunks = np.array_split(customers, os.cpu_count())
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(process_chunk, chunk) for chunk in customer_chunks]
-        for future in concurrent.futures.as_completed(futures):
-            results.extend(future.result())
+    for customer in customer_names:
+        normalized_customer = normalize_name(customer)
+        soundex_customer = get_soundex(normalized_customer)
 
-    return pd.DataFrame(results).sort_values(by='Score', ascending=False) if results else pd.DataFrame()
+        for sanctioned in sanctioned_names:
+            normalized_sanctioned = normalize_name(sanctioned)
+            fuzzy_score = fuzz.token_set_ratio(normalized_customer, normalized_sanctioned)
 
-# Streamlit Web UI
-st.title('Sanctions Name Screening System')
+            soundex_sanctioned = get_soundex(normalized_sanctioned)
+            is_soundex_match = soundex_customer == soundex_sanctioned
 
-source_option = st.radio("Choose Screening Type:", (
-    'Default List (All Websites)', 'Custom Website', 'From Another File'))
+            if fuzzy_score >= FUZZY_THRESHOLD or is_soundex_match:
+                matches.append({
+                    "Customer Name": customer,
+                    "Sanctioned Name": sanctioned,
+                    "Fuzzy Score": fuzzy_score,
+                    "Soundex Match": is_soundex_match,
+                    "Match Method": "Soundex" if is_soundex_match else "Fuzzy"
+                })
 
-file = st.file_uploader("Upload Customer File (Excel, CSV, PDF)", type=["xlsx", "csv", "pdf"])
+    return matches
 
-if source_option == 'Custom Website':
-    website_url = st.text_input("Enter Website URL for Screening")
-elif source_option == 'From Another File':
-    compare_file = st.file_uploader("Upload Comparison File (Excel, CSV, PDF)", type=["xlsx", "csv", "pdf"])
+def main():
+    print("Fetching UN sanctioned names...")
+    sanctioned_names = fetch_sanctioned_names_from_un()
 
-output_format = st.radio("Choose Output Format:", ('xlsx', 'csv'))
+    print("Reading customer data from Excel...")
+    customer_names = load_customer_names(CUSTOMER_FILE)
 
-if st.button('Run Screening') and file:
-    if file.name.endswith('.xlsx'):
-        customers = pd.concat(pd.read_excel(file, sheet_name=None, engine='openpyxl').values()).stack().astype(str).dropna()
-    elif file.name.endswith('.csv'):
-        customers = pd.read_csv(file).stack().astype(str).dropna()
+    print("Performing name screening...")
+    results = match_names(customer_names, sanctioned_names)
+
+    if results:
+        result_df = pd.DataFrame(results)
+        print("\nMatches found:\n")
+        print(result_df.to_string(index=False))
+        result_df.to_excel("screening_results.xlsx", index=False)
+        print("\nResults saved to 'screening_results.xlsx'")
     else:
-        customers = extract_text_from_pdf(file)
+        print("No matches found.")
 
-    if source_option == 'Default List (All Websites)':
-        comparison_names = fetch_all_default_names()
-    elif source_option == 'Custom Website' and website_url:
-        comparison_names = fetch_names_from_website(website_url)
-    elif source_option == 'From Another File' and compare_file:
-        if compare_file.name.endswith('.xlsx'):
-            comparison_names = pd.concat(pd.read_excel(compare_file, sheet_name=None, engine='openpyxl').values()).stack().astype(str).dropna()
-        elif compare_file.name.endswith('.csv'):
-            comparison_names = pd.read_csv(compare_file).stack().astype(str).dropna()
-        else:
-            comparison_names = extract_text_from_pdf(compare_file)
-    else:
-        st.warning('No source selected or invalid input.')
-        comparison_names = pd.Series([])
-
-    results = parallel_screening(comparison_names, customers)
-
-    if not results.empty:
-        st.success('Screening Completed! Download results below:')
-        st.dataframe(results)
-
-        if output_format == 'xlsx':
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                results.to_excel(writer, index=False)
-            output.seek(0)
-            st.download_button("Download Results", data=output,
-                               file_name="screening_results.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        else:
-            output = io.StringIO()
-            results.to_csv(output, index=False)
-            st.download_button("Download Results", data=output.getvalue(),
-                               file_name="screening_results.csv",
-                               mime="text/csv")
-    else:
-        st.warning('No matches found. Check input data or URL.')
+if __name__ == "__main__":
+    main()
