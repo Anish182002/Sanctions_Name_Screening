@@ -130,6 +130,7 @@ elif source_option == 'From Another File':
     compare_file = st.file_uploader("Upload Comparison File (Excel, CSV, PDF)", type=["xlsx", "csv", "pdf"])
 
 output_format = st.radio("Choose Output Format:", ('xlsx', 'csv'))
+threshold = st.slider("Set Match Threshold (higher = stricter)", min_value=0, max_value=100, value=60)
 
 if st.button('Run Screening') and file:
     if file.name.endswith('.xlsx'):
@@ -154,7 +155,7 @@ if st.button('Run Screening') and file:
         st.warning('No source selected or invalid input.')
         comparison_names = pd.Series([])
 
-    results = parallel_screening(comparison_names, customers)
+    results = parallel_screening(comparison_names, customers, threshold=threshold)
     if not results.empty:
         st.success('Screening Completed! Download results below:')
         st.dataframe(results)
