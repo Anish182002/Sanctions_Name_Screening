@@ -1,7 +1,11 @@
-from flask import Flask, request, render_template, jsonify
+import os
+import streamlit as st
 import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
+import concurrent.futures
+import numpy as np
+import fitz  # PyMuPDF
 from rapidfuzz import fuzz
 import jellyfish
 import unicodedata
@@ -12,9 +16,15 @@ import io
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-app = Flask(__name__)
+# Default websites for screening
+DEFAULT_WEBSITES = [
+    "https://scsanctions.un.org/resources/xml/en/consolidated.xml",
+    "https://www.mha.gov.in/en/banned-organisations",
+    "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa",
+    "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
+]
 
-# -------------------- Normalize Names -------------------- #
+# Normalize Names
 def normalize_name(name):
     if not isinstance(name, str):
         return ['']
@@ -22,11 +32,11 @@ def normalize_name(name):
     aliases = re.split(r'\s*[@|/|\|]\s*', name)
     return [re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s*', '', alias).strip().lower() for alias in aliases]
 
-# -------------------- Fetch Names From Website -------------------- #
+# Fetch Names from Website
+@st.cache_data
 def fetch_names_from_website(url):
     try:
-        response = requests.get(url, verify=False, timeout=15)
-        response.raise_for_status()
+        response = requests.get(url, verify=False, timeout=10)
         if 'xml' in response.headers.get('Content-Type', ''):
             tree = ET.fromstring(response.content)
             return pd.Series([elem.text for elem in tree.iter() if elem.text]).dropna()
@@ -34,10 +44,24 @@ def fetch_names_from_website(url):
             soup = BeautifulSoup(response.text, 'html.parser')
             return pd.Series([tag.get_text(strip=True) for tag in soup.find_all(['p', 'li', 'span'])]).dropna()
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return pd.Series()
+        st.warning(f"Error fetching from {url}: {e}")
+        return pd.Series([])
 
-# -------------------- Improved Hybrid Match -------------------- #
+@st.cache_data
+def fetch_all_default_names():
+    all_names = pd.Series([])
+    for url in DEFAULT_WEBSITES:
+        names = fetch_names_from_website(url)
+        all_names = pd.concat([all_names, names], ignore_index=True)
+    return all_names.dropna()
+
+# Extract Text from PDF
+def extract_text_from_pdf(file):
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    text = "\n".join(page.get_text("text") for page in doc)
+    return pd.Series(re.findall(r'\b[A-Za-z]+(?: [A-Za-z]+)*\b', text)).dropna()
+
+# Improved Hybrid Matching
 def hybrid_match(name1_list, name2_list):
     max_score = 0
     for n1 in name1_list:
@@ -51,57 +75,90 @@ def hybrid_match(name1_list, name2_list):
             max_score = max(max_score, total_score)
     return max_score
 
-# -------------------- Screening Logic -------------------- #
-def perform_screening(names_list, customers, threshold=70):
+# Parallel Screening
+def parallel_screening(names_list, customers, threshold=70):
     results = []
-    for c in customers.dropna():
-        c_norm = normalize_name(c)
-        for n in names_list.dropna():
-            n_norm = normalize_name(n)
-            score = hybrid_match(c_norm, n_norm)
-            if score >= threshold:
-                results.append({'Customer': c, 'Matched Name': n, 'Score': round(score, 2)})
+
+    def process_chunk(chunk):
+        chunk_results = []
+        for c in chunk:
+            c_norm = normalize_name(c)
+            for n in names_list:
+                n_norm = normalize_name(n)
+                score = hybrid_match(c_norm, n_norm)
+                if score >= threshold:
+                    chunk_results.append({
+                        'Customer': c,
+                        'Matched Name': n,
+                        'Score': round(score, 2)
+                    })
+        return chunk_results
+
+    customer_chunks = np.array_split(customers, os.cpu_count())
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(process_chunk, chunk) for chunk in customer_chunks]
+        for future in concurrent.futures.as_completed(futures):
+            results.extend(future.result())
+
     return pd.DataFrame(results).sort_values(by='Score', ascending=False) if results else pd.DataFrame()
 
-# -------------------- Routes -------------------- #
-@app.route('/')
-def index():
-    return render_template('index.html')  # Make sure index.html exists in a 'templates' folder
+# Streamlit Web UI
+st.title('Sanctions Name Screening System')
 
-@app.route('/screen', methods=['POST'])
-def screen():
-    file = request.files.get('file')
-    website_url = request.form.get('website_url')
+source_option = st.radio("Choose Screening Type:", (
+    'Default List (All Websites)', 'Custom Website', 'From Another File'))
 
-    default_websites = [
-        "https://scsanctions.un.org/kho39en-all.html",
-        "https://www.mha.gov.in/en/banned-organisations",
-        "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa",
-        "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
-    ]
+file = st.file_uploader("Upload Customer File (Excel, CSV, PDF)", type=["xlsx", "csv", "pdf"])
 
-    if not file:
-        return jsonify({"error": "No file uploaded."}), 400
+if source_option == 'Custom Website':
+    website_url = st.text_input("Enter Website URL for Screening")
+elif source_option == 'From Another File':
+    compare_file = st.file_uploader("Upload Comparison File (Excel, CSV, PDF)", type=["xlsx", "csv", "pdf"])
 
-    # Read customer file
-    try:
-        if file.filename.endswith('.xlsx'):
-            customers = pd.concat(pd.read_excel(file, sheet_name=None, engine='openpyxl').values()).stack().astype(str).dropna()
-        else:
-            customers = pd.read_csv(file).stack().astype(str).dropna()
-    except Exception as e:
-        return jsonify({"error": f"Failed to read file: {e}"}), 400
+output_format = st.radio("Choose Output Format:", ('xlsx', 'csv'))
 
-    # Fetch sanction list names
-    if website_url:
-        comparison_names = fetch_names_from_website(website_url)
+if st.button('Run Screening') and file:
+    if file.name.endswith('.xlsx'):
+        customers = pd.concat(pd.read_excel(file, sheet_name=None, engine='openpyxl').values()).stack().astype(str).dropna()
+    elif file.name.endswith('.csv'):
+        customers = pd.read_csv(file).stack().astype(str).dropna()
     else:
-        comparison_names = pd.concat([fetch_names_from_website(url) for url in default_websites])
+        customers = extract_text_from_pdf(file)
 
-    # Perform screening
-    results = perform_screening(comparison_names, customers, threshold=70)
-    return results.to_json(orient='records')
+    if source_option == 'Default List (All Websites)':
+        comparison_names = fetch_all_default_names()
+    elif source_option == 'Custom Website' and website_url:
+        comparison_names = fetch_names_from_website(website_url)
+    elif source_option == 'From Another File' and compare_file:
+        if compare_file.name.endswith('.xlsx'):
+            comparison_names = pd.concat(pd.read_excel(compare_file, sheet_name=None, engine='openpyxl').values()).stack().astype(str).dropna()
+        elif compare_file.name.endswith('.csv'):
+            comparison_names = pd.read_csv(compare_file).stack().astype(str).dropna()
+        else:
+            comparison_names = extract_text_from_pdf(compare_file)
+    else:
+        st.warning('No source selected or invalid input.')
+        comparison_names = pd.Series([])
 
-# -------------------- Run App -------------------- #
-if __name__ == '__main__':
-    app.run(debug=True)
+    results = parallel_screening(comparison_names, customers)
+
+    if not results.empty:
+        st.success('Screening Completed! Download results below:')
+        st.dataframe(results)
+
+        if output_format == 'xlsx':
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                results.to_excel(writer, index=False)
+            output.seek(0)
+            st.download_button("Download Results", data=output,
+                               file_name="screening_results.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            output = io.StringIO()
+            results.to_csv(output, index=False)
+            st.download_button("Download Results", data=output.getvalue(),
+                               file_name="screening_results.csv",
+                               mime="text/csv")
+    else:
+        st.warning('No matches found. Check input data or URL.')
