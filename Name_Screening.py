@@ -6,9 +6,10 @@ import unicodedata
 from rapidfuzz import fuzz
 import jellyfish
 import streamlit as st
+from bs4 import BeautifulSoup
 
 # ----------------------------
-# Preprocessing Function
+# Name Preprocessing
 # ----------------------------
 def preprocess_name(name):
     name = unicodedata.normalize('NFKD', name)
@@ -17,34 +18,99 @@ def preprocess_name(name):
     return name
 
 # ----------------------------
-# Download Sanctions List from UN XML
+# Fetch UN Sanctions Names
 # ----------------------------
 @st.cache_data
-def get_sanctioned_names():
+def get_un_sanctions():
     url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         root = ET.fromstring(response.content)
         namespaces = {'ns': 'urn:un:sc:consolidated:v1'}
-
         names = []
         for individual in root.findall(".//ns:INDIVIDUAL", namespaces):
-            full_name = ""
             for name_part in individual.findall(".//ns:INDIVIDUAL_NAME", namespaces):
-                whole_name = name_part.findtext("ns:NAME", default="", namespaces=namespaces)
-                if whole_name:
-                    full_name = whole_name.strip()
+                full_name = name_part.findtext("ns:NAME", default="", namespaces=namespaces)
+                if full_name:
+                    names.append(preprocess_name(full_name))
                     break
-            if full_name:
-                names.append(preprocess_name(full_name))
         return list(set(names))
     except Exception as e:
-        st.error(f"Failed to fetch sanctions list: {e}")
+        st.warning(f"UN sanctions list could not be loaded: {e}")
         return []
 
 # ----------------------------
-# Scoring Function (Weighted Hybrid)
+# Fetch MHA Banned Organisations
+# ----------------------------
+@st.cache_data
+def get_mha_banned_organisations():
+    url = "https://www.mha.gov.in/en/banned-organisations"
+    try:
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.content, 'lxml')
+        banned_names = []
+        table = soup.find('table')
+        if table:
+            rows = table.find_all('tr')[1:]  # Skip header
+            for row in rows:
+                cols = row.find_all('td')
+                if cols:
+                    name = cols[0].text.strip()
+                    banned_names.append(preprocess_name(name))
+        return list(set(banned_names))
+    except Exception as e:
+        st.warning(f"Banned organisations list could not be loaded: {e}")
+        return []
+
+# ----------------------------
+# Fetch MHA Individual Terrorists
+# ----------------------------
+@st.cache_data
+def get_mha_individual_terrorists():
+    url = "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa"
+    try:
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.content, 'lxml')
+        terrorists = []
+        table = soup.find('table')
+        if table:
+            rows = table.find_all('tr')[1:]
+            for row in rows:
+                cols = row.find_all('td')
+                if cols:
+                    name = cols[0].text.strip()
+                    terrorists.append(preprocess_name(name))
+        return list(set(terrorists))
+    except Exception as e:
+        st.warning(f"Individual terrorists list could not be loaded: {e}")
+        return []
+
+# ----------------------------
+# Fetch MHA Unlawful Associations
+# ----------------------------
+@st.cache_data
+def get_mha_unlawful_associations():
+    url = "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
+    try:
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.content, 'lxml')
+        associations = []
+        table = soup.find('table')
+        if table:
+            rows = table.find_all('tr')[1:]
+            for row in rows:
+                cols = row.find_all('td')
+                if cols:
+                    name = cols[0].text.strip()
+                    associations.append(preprocess_name(name))
+        return list(set(associations))
+    except Exception as e:
+        st.warning(f"Unlawful associations list could not be loaded: {e}")
+        return []
+
+# ----------------------------
+# Match Scoring
 # ----------------------------
 def calculate_score(customer_name, sanctioned_name):
     tsr = fuzz.token_sort_ratio(customer_name, sanctioned_name)
@@ -54,11 +120,10 @@ def calculate_score(customer_name, sanctioned_name):
     return round(final_score, 2)
 
 # ----------------------------
-# Matching Function
+# Perform Matching
 # ----------------------------
 def match_customers(customers_df, sanctioned_names, threshold=85):
     results = []
-
     for _, row in customers_df.iterrows():
         original = row['Customer']
         customer = preprocess_name(original)
@@ -83,41 +148,35 @@ def match_customers(customers_df, sanctioned_names, threshold=85):
     return pd.DataFrame(results)
 
 # ----------------------------
-# Streamlit UI
+# Streamlit App
 # ----------------------------
 def main():
-    st.title("🔍 UN Sanctions Name Screening Tool")
-    st.write("Upload your customer Excel file and set the similarity threshold.")
-
-    # Threshold slider
-    threshold = st.slider("Select Match Threshold (%)", min_value=50, max_value=100, value=85, step=1)
-
-    # File uploader
+    st.title("🚨 Name Screening Tool - UN & MHA Sanctions")
+    threshold = st.slider("Set Match Threshold (%)", 50, 100, 85, step=1)
     uploaded_file = st.file_uploader("Upload Customer Excel File", type=["xlsx"])
 
     if uploaded_file:
         try:
             customers_df = pd.read_excel(uploaded_file)
             if 'Customer' not in customers_df.columns:
-                st.error("Excel must have a column named 'Customer'.")
+                st.error("The Excel file must contain a 'Customer' column.")
                 return
 
-            st.success("File uploaded successfully.")
-            with st.spinner("Fetching UN sanctions list..."):
-                sanctioned_names = get_sanctioned_names()
+            with st.spinner("Fetching all sanctions data..."):
+                un_names = get_un_sanctions()
+                org_names = get_mha_banned_organisations()
+                ind_names = get_mha_individual_terrorists()
+                assoc_names = get_mha_unlawful_associations()
 
-            if not sanctioned_names:
-                st.error("Could not retrieve sanctioned names.")
-                return
+                all_sanctioned = list(set(un_names + org_names + ind_names + assoc_names))
 
-            with st.spinner("Matching names..."):
-                results_df = match_customers(customers_df, sanctioned_names, threshold)
+            with st.spinner("Matching customers..."):
+                result_df = match_customers(customers_df, all_sanctioned, threshold)
 
-            st.success(f"Matching complete. {len(results_df)} matches found.")
-            st.dataframe(results_df)
+            st.success(f"Found {len(result_df)} matches above threshold.")
+            st.dataframe(result_df)
 
-            # Download link
-            st.download_button("📥 Download Results", data=results_df.to_excel(index=False), file_name="sanctioned_matches.xlsx")
+            st.download_button("📥 Download Results", data=result_df.to_excel(index=False), file_name="matches.xlsx")
 
         except Exception as e:
             st.error(f"An error occurred: {e}")
