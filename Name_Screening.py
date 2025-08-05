@@ -157,10 +157,15 @@ def main():
 
     if uploaded_file:
         try:
-            customers_df = pd.read_excel(uploaded_file)
-            if 'Customer' not in customers_df.columns:
-                st.error("The Excel file must contain a 'Customer' column.")
-                return
+            # Load names from first column (Column A)
+df_raw = pd.read_excel(uploaded_file, header=None)  # No header assumed
+if df_raw.empty or df_raw.shape[1] < 1:
+    st.error("Excel file must contain at least one column with names in Column A.")
+    return
+
+df_raw.columns = ['Customer']  # Assign a column name for internal use
+customers_df = df_raw
+
 
             with st.spinner("Fetching all sanctions data..."):
                 un_names = get_un_sanctions()
