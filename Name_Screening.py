@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 # Name Preprocessing
 # ----------------------------
 def preprocess_name(name):
-    name = unicodedata.normalize('NFKD', name)
+    name = unicodedata.normalize('NFKD', str(name))
     name = re.sub(r'[^a-zA-Z\s]', '', name)
     name = re.sub(r'\s+', ' ', name).strip().lower()
     return name
@@ -52,7 +52,7 @@ def get_mha_banned_organisations():
         banned_names = []
         table = soup.find('table')
         if table:
-            rows = table.find_all('tr')[1:]  # Skip header
+            rows = table.find_all('tr')[1:]
             for row in rows:
                 cols = row.find_all('td')
                 if cols:
@@ -151,23 +151,23 @@ def match_customers(customers_df, sanctioned_names, threshold=85):
 # Streamlit App
 # ----------------------------
 def main():
-    st.title("🚨 Name Screening Tool - UN & MHA Sanctions")
+    st.title("🚨 Name Screening Tool (UN & MHA Sanctions)")
+    st.write("Check names against UN and Indian MHA sanctions lists.")
+
     threshold = st.slider("Set Match Threshold (%)", 50, 100, 85, step=1)
-    uploaded_file = st.file_uploader("Upload Customer Excel File", type=["xlsx"])
+    uploaded_file = st.file_uploader("📂 Upload Excel File with Names in Column A", type=["xlsx"])
 
     if uploaded_file:
         try:
-            # Load names from first column (Column A)
-df_raw = pd.read_excel(uploaded_file, header=None)  # No header assumed
-if df_raw.empty or df_raw.shape[1] < 1:
-    st.error("Excel file must contain at least one column with names in Column A.")
-    return
+            df_raw = pd.read_excel(uploaded_file, header=None)
+            if df_raw.empty or df_raw.shape[1] < 1:
+                st.error("Excel file must contain at least one column with names in Column A.")
+                return
 
-df_raw.columns = ['Customer']  # Assign a column name for internal use
-customers_df = df_raw
+            df_raw.columns = ['Customer']
+            customers_df = df_raw
 
-
-            with st.spinner("Fetching all sanctions data..."):
+            with st.spinner("📡 Fetching data from UN and MHA websites..."):
                 un_names = get_un_sanctions()
                 org_names = get_mha_banned_organisations()
                 ind_names = get_mha_individual_terrorists()
@@ -175,16 +175,16 @@ customers_df = df_raw
 
                 all_sanctioned = list(set(un_names + org_names + ind_names + assoc_names))
 
-            with st.spinner("Matching customers..."):
+            with st.spinner("🔍 Matching names..."):
                 result_df = match_customers(customers_df, all_sanctioned, threshold)
 
-            st.success(f"Found {len(result_df)} matches above threshold.")
+            st.success(f"✅ Found {len(result_df)} matching names above threshold.")
             st.dataframe(result_df)
 
-            st.download_button("📥 Download Results", data=result_df.to_excel(index=False), file_name="matches.xlsx")
+            st.download_button("📥 Download Matches", data=result_df.to_excel(index=False), file_name="matches.xlsx")
 
         except Exception as e:
-            st.error(f"An error occurred: {e}")
+            st.error(f"❌ Error: {e}")
 
 if __name__ == "__main__":
     main()
