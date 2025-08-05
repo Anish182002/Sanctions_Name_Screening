@@ -29,8 +29,10 @@ def normalize_name(name):
     if not isinstance(name, str):
         return ['']
     name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8')
+    name = re.sub(r'^\d+\.\s*', '', name)  # Remove leading numbers like '4.'
+    name = re.sub(r'[.,;:!?]+$', '', name)  # Remove trailing punctuation
     aliases = re.split(r'\s*[@|/|\|]\s*', name)
-    return [re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s', '', alias).strip().lower() for alias in aliases]
+    return [re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s*', '', alias).strip().lower() for alias in aliases]
 
 # Fetch Names from Websites
 @st.cache_data
@@ -140,3 +142,4 @@ if st.button('Run Screening') and file:
             st.download_button("Download Results", data=output.getvalue(), file_name="screening_results.csv", mime="text/csv")
     else:
         st.warning('No matches found. Check input data or URL.')
+
