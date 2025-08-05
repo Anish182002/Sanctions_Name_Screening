@@ -29,10 +29,11 @@ def normalize_name(name):
     if not isinstance(name, str):
         return ['']
     name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8')
-    name = re.sub(r'^\d+\.\s*', '', name)  # Remove leading numbers like '4.'
-    name = re.sub(r'[.,;:!?]+$', '', name)  # Remove trailing punctuation
+    name = re.sub(r'^\d+\.\s*', '', name)                     # Remove leading numbers like "4."
+    name = re.sub(r'[.,;:!?]+$', '', name)                    # Remove trailing punctuation
     aliases = re.split(r'\s*[@|/|\|]\s*', name)
     return [re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s*', '', alias).strip().lower() for alias in aliases]
+
 
 # Fetch Names from Websites
 @st.cache_data
@@ -66,28 +67,41 @@ def extract_text_from_pdf(file):
 
 # Hybrid Matching (Optimized)
 def hybrid_match(name1_list, name2_list):
-    return max(
-        (fuzz.ratio(n1, n2) * 0.4 + jellyfish.jaro_winkler_similarity(n1, n2) * 100 * 0.5 + (
-            10 if jellyfish.soundex(n1) == jellyfish.soundex(n2) else 0))
-        for n1 in name1_list for n2 in name2_list
-    )
+    best_score = 0
+    for n1 in name1_list:
+        for n2 in name2_list:
+            tokens1, tokens2 = len(n1.split()), len(n2.split())
+            score = (
+                fuzz.ratio(n1, n2) * 0.4 +
+                jellyfish.jaro_winkler_similarity(n1, n2) * 100 * 0.5 +
+                (10 if jellyfish.soundex(n1) == jellyfish.soundex(n2) else 0)
+            )
+            if abs(tokens1 - tokens2) >= 2:
+                score -= 15  # penalize big token count gaps
+            best_score = max(best_score, score)
+    return best_score
 
 # Parallelized Screening
 def parallel_screening(names_list, customers, threshold=55):
     results = []
-    
+
     def process_chunk(chunk):
-        return [
-            {'Customer': c, 'Matched Name': n, 'Score': hybrid_match(normalize_name(c), normalize_name(n))}
-            for c in chunk for n in names_list if hybrid_match(normalize_name(c), normalize_name(n)) >= threshold
-        ]
-    
+        matched = []
+        for c in chunk:
+            c_norm = normalize_name(c)
+            for n in names_list:
+                n_norm = normalize_name(n)
+                score = hybrid_match(c_norm, n_norm)
+                if score >= threshold:
+                    matched.append({'Customer': c, 'Matched Name': n, 'Score': round(score, 4)})
+        return matched
+
     customer_chunks = np.array_split(customers, os.cpu_count())
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [executor.submit(process_chunk, chunk) for chunk in customer_chunks]
         for future in concurrent.futures.as_completed(futures):
             results.extend(future.result())
-    
+
     return pd.DataFrame(results).sort_values(by='Score', ascending=False) if results else pd.DataFrame()
 
 # Streamlit Web App
@@ -142,5 +156,6 @@ if st.button('Run Screening') and file:
             st.download_button("Download Results", data=output.getvalue(), file_name="screening_results.csv", mime="text/csv")
     else:
         st.warning('No matches found. Check input data or URL.')
+
 
 
